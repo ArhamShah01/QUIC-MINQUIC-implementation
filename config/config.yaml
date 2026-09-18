@@ -1,0 +1,19 @@
+server:
+  host: "127.0.0.1"
+  port: 4433
+  cert_path: "certs/server.crt"
+  key_path: "certs/server.key"
+client:
+  host: "127.0.0.1"
+  port: 4433
+  payload_size: 1024   # bytes per message
+  streams: 1            # number of parallel streams to open
+  timeout: 10           # seconds
+experiment:
+  loss_percent: 0      # packet loss simulation via netem
+  latency_ms: 0        # added one‑way delay
+  jitter_ms: 0
+  bandwidth_mbps: 0    # rate limit, 0 = unlimited
+metrics:
+  output_dir: "experiments/results"
+  format: "csv"
