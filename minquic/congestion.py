@@ -18,6 +18,14 @@ from aioquic.quic.packet_builder import QuicSentPacket
 
 logger = logging.getLogger("minquic.congestion")
 
+# BtlBW is the max delivery rate over this many round trips (as in BBR).
+BTLBW_FILTER_ROUNDS = 10
+# Algorithm 1: a round whose min RTT exceeds K_TARGET_RTT * RTprop is treated
+# as jitter-inflated, and the oldest BtlBW sample is discarded.
+# The paper does not give a value for k; tune it here.
+K_TARGET_RTT = 1.25
+
+
 class MinBbrCongestionControl(QuicCongestionControl):
     """
     MINBBR Congestion Control Implementation.
@@ -26,7 +34,8 @@ class MinBbrCongestionControl(QuicCongestionControl):
     1. Delay-Aware Probing: Switches between aggressive and BBRv2-compatible
        modes based on network delay.
     2. BDP Compensation: Compensates for Bandwidth-Delay Product under
-       network jitter to reduce throughput loss.
+       network jitter to reduce throughput loss (the "MIN BtlBW filter",
+       Algorithm 1 of the MINQUIC paper).
 
     aioquic reads ``congestion_window`` and ``bytes_in_flight`` from this object
     to decide how much it may send, so both must be kept up to date here.
@@ -35,29 +44,66 @@ class MinBbrCongestionControl(QuicCongestionControl):
         super().__init__(max_datagram_size=max_datagram_size)
         self._min_window = K_MINIMUM_WINDOW * max_datagram_size
         # Internal state variables for MINBBR
-        self.btl_bw = 1000000.0  # Default 1MB/s
-        self.rtprop = 0.1  # Default 100ms
-        self.bdp = self.btl_bw * self.rtprop
+        self.btl_bw = 0.0  # bytes/s, max of btl_bw_filter
+        self.rtprop = None  # seconds, min RTT seen; None until the first sample
+        self.bdp = 0.0
         self.state = "STARTUP"  # Startup, Drain, ProbeBW, ProbeRTT
-        self.jitter_buffer = []
-        self.jitter_compensation_factor = 1.0
         self.congestion_window = 1460 * 10  # Initial CWND
 
+        # Delivery-rate sampling: bytes delivered so far, when the latest ACK
+        # arrived, and per in-flight packet the values at the time it was sent.
+        self._delivered = 0
+        self._delivered_time = None
+        self._packet_state = {}  # (epoch, packet_number) -> (delivered, delivered_time)
+
+        # Round trips: a round ends when a packet sent after the previous
+        # round ended is acknowledged.
+        self.round_count = 0
+        self._next_round_delivered = 0
+        self._round_min_rtt = None
+
+        # BtlBW max filter: one (round, max delivery rate in that round) entry
+        # per round, covering the last BTLBW_FILTER_ROUNDS rounds.
+        self.btl_bw_filter = []
+
+    def _on_bandwidth_sample(self, bw: float) -> None:
+        """Add a delivery-rate sample to the current round's filter entry."""
+        if self.btl_bw_filter and self.btl_bw_filter[-1][0] == self.round_count:
+            if bw > self.btl_bw_filter[-1][1]:
+                self.btl_bw_filter[-1] = (self.round_count, bw)
+        else:
+            self.btl_bw_filter.append((self.round_count, bw))
+        self._update_btl_bw()
+
+    def _update_btl_bw(self) -> None:
+        oldest_round = self.round_count - BTLBW_FILTER_ROUNDS + 1
+        self.btl_bw_filter = [e for e in self.btl_bw_filter if e[0] >= oldest_round]
+        self.btl_bw = max((bw for _, bw in self.btl_bw_filter), default=0.0)
+
+    def _on_round_end(self) -> None:
+        """Apply the MIN BtlBW filter (Algorithm 1) to the round that just ended."""
+        if self.rtprop is not None and self._round_min_rtt is not None:
+            target_rtt = K_TARGET_RTT * self.rtprop
+            should_min = self._round_min_rtt > target_rtt
+            # Keep at least one sample so BtlBW never collapses to zero.
+            if should_min and len(self.btl_bw_filter) > 1:
+                del self.btl_bw_filter[0]
+        self._round_min_rtt = None
+        self.round_count += 1
+        self._update_btl_bw()
+
     def _update_estimates(self, rtt: float) -> None:
-        """Update bandwidth and delay estimates from an RTT sample."""
+        """Update delay estimates, BDP and state from an RTT sample."""
 
         # Update RTprop (min RTT)
-        if rtt < self.rtprop:
+        if self.rtprop is None or rtt < self.rtprop:
             self.rtprop = rtt
+        if self._round_min_rtt is None or rtt < self._round_min_rtt:
+            self._round_min_rtt = rtt
 
-        # Simplified bandwidth estimation: (bytes_in_flight / rtt)
-        # We use a base flight of 10 packets as a heuristic for simple demos
-        current_flight = 1460 * 10
-        current_bw = current_flight / max(rtt, 0.001)
-        self.btl_bw = max(self.btl_bw, current_bw)
-
-        # Calculate BDP and apply jitter compensation
-        self.bdp = self.btl_bw * self.rtprop * self.jitter_compensation_factor
+        # BtlBW comes from measured delivery rate (see on_packet_acked); the
+        # MIN BtlBW filter already dropped jitter-inflated samples.
+        self.bdp = self.btl_bw * self.rtprop
 
         # Update CWND based on MINBBR state
         self.congestion_window = self.get_congestion_window()
@@ -99,20 +145,49 @@ class MinBbrCongestionControl(QuicCongestionControl):
     # --- aioquic QuicCongestionControl interface ---
 
     def on_packet_acked(self, *, now: float, packet: QuicSentPacket) -> None:
-        # Estimates are updated in on_rtt_measurement, which aioquic calls
-        # with the RTT sample right after the acked packets are processed.
+        # RTT-based estimates are updated in on_rtt_measurement, which aioquic
+        # calls right after the acked packets are processed.
         self.bytes_in_flight -= packet.sent_bytes
+        self._delivered += packet.sent_bytes
+        self._delivered_time = now
+
+        state = self._packet_state.pop((packet.epoch, packet.packet_number), None)
+        if state is None:
+            return
+        delivered_at_send, delivered_time_at_send = state
+
+        # Delivery rate: bytes acknowledged since this packet was sent, over
+        # the time between the ACK before it was sent and this ACK.
+        if delivered_time_at_send is not None:
+            interval = now - delivered_time_at_send
+            if interval > 0:
+                self._on_bandwidth_sample((self._delivered - delivered_at_send) / interval)
+
+        if delivered_at_send >= self._next_round_delivered:
+            self._next_round_delivered = self._delivered
+            self._on_round_end()
 
     def on_packet_sent(self, *, packet: QuicSentPacket) -> None:
         self.bytes_in_flight += packet.sent_bytes
+        if self._delivered_time is None:
+            # Nothing acked yet: measure the first samples from the send time.
+            self._delivered_time = packet.sent_time
+        self._packet_state[(packet.epoch, packet.packet_number)] = (
+            self._delivered,
+            self._delivered_time,
+        )
 
     def on_packets_expired(self, *, packets: Iterable[QuicSentPacket]) -> None:
         for packet in packets:
             self.bytes_in_flight -= packet.sent_bytes
+            self._packet_state.pop((packet.epoch, packet.packet_number), None)
 
     def on_packets_lost(self, *, now: float, packets: Iterable[QuicSentPacket]) -> None:
         for packet in packets:
             self.bytes_in_flight -= packet.sent_bytes
+            self._packet_state.pop((packet.epoch, packet.packet_number), None)
+        # Cut the filter samples too, or the next update would undo the cut.
+        self.btl_bw_filter = [(r, bw * 0.8) for r, bw in self.btl_bw_filter]
         self.btl_bw *= 0.8
         self.state = "DRAIN"
         self.congestion_window = self.get_congestion_window()
