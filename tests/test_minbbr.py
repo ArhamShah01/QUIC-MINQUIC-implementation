@@ -49,6 +49,17 @@ def test_bytes_in_flight_accounting():
     assert cc._packet_state == {}
 
 
+def run_until_probe_bw(cc, pn, now, rtt=0.05):
+    """Run steady rounds until MINBBR leaves STARTUP/DRAIN for PROBE_BW."""
+    for _ in range(20):
+        if cc.state == "PROBE_BW":
+            break
+        pn = run_round(cc, pn, now=now, rtt=rtt)
+        now += 0.1
+    assert cc.state == "PROBE_BW"
+    return pn, now
+
+
 def test_btl_bw_is_measured_delivery_rate():
     cc = MinBbrCongestionControl(max_datagram_size=1200)
     # 10 x 1000 bytes delivered in 50 ms -> 200,000 bytes/s.
@@ -56,19 +67,89 @@ def test_btl_bw_is_measured_delivery_rate():
     assert cc.btl_bw == 10_000 / 0.05
     assert cc.rtprop == 0.05
     assert cc.bdp == cc.btl_bw * cc.rtprop
-    assert cc.state == "PROBE_BW"
+    assert cc.state == "STARTUP"
 
 
-def test_state_switching_on_delay():
+def test_startup_grows_window_by_acked_bytes():
     cc = MinBbrCongestionControl(max_datagram_size=1200)
-    pn = run_round(cc, 0, now=0.0, rtt=0.05)
-    pn = run_round(cc, pn, now=0.1, rtt=0.05)
+    initial = cc.congestion_window
+    run_round(cc, 0, now=0.0, rtt=0.05)
+    assert cc.congestion_window == initial + 10_000
+
+
+def test_startup_exits_when_bandwidth_plateaus():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = 0, 0.0
+    # Constant delivery rate: BtlBW stops growing, so STARTUP ends after
+    # FULL_BW_ROUNDS rounds, DRAIN empties, and PROBE_BW starts in DOWN.
+    rounds = 0
+    while cc.state == "STARTUP" and rounds < 10:
+        pn = run_round(cc, pn, now=now, rtt=0.05)
+        now += 0.1
+        rounds += 1
+    assert rounds > 3  # needs 3 rounds without 25% BtlBW growth
+    # This round's remaining ACKs empty the pipe, so DRAIN ends immediately.
     assert cc.state == "PROBE_BW"
-    assert cc.congestion_window == int(cc.bdp * 2.0)
-    # A delay spike well above RTprop switches to the BBRv2-compatible mode.
-    pn = run_round(cc, pn, now=0.2, rtt=0.1)
+    assert cc.probe_bw_phase == "DOWN"
+
+
+def test_probe_bw_cycles_through_phases():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = run_until_probe_bw(cc, 0, 0.0)
+    seen = [cc.probe_bw_phase]
+    for _ in range(9):
+        pn = run_round(cc, pn, now=now, rtt=0.05)
+        now += 0.1
+        seen.append(cc.probe_bw_phase)
+    assert seen == ["DOWN", "CRUISE", "CRUISE", "CRUISE", "CRUISE", "CRUISE",
+                    "CRUISE", "REFILL", "UP", "DOWN"]
+    assert cc.probe_bw_version == "MINBBR"
+
+
+def test_probe_bw_window_gain_follows_phase():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    run_until_probe_bw(cc, 0, 0.0)
+    cc.probe_bw_phase = "UP"
+    assert cc.get_congestion_window() == int(cc.bdp * 2.0)
+    cc.probe_bw_phase = "DOWN"
+    assert cc.get_congestion_window() == max(int(cc.bdp * 0.75), 4 * 1200)
+
+
+def test_algorithm2_switches_to_bbrv2_and_back():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = run_until_probe_bw(cc, 0, 0.0)
+    # Queueing from a competitor: every round's MinRTT is well above RTprop.
+    # After THETA_R1 = 2 ProbeCruise sub-states, switch to BBRv2 and restart.
+    for _ in range(30):
+        pn = run_round(cc, pn, now=now, rtt=0.08)
+        now += 0.1
+        if cc.probe_bw_version == "BBRV2":
+            break
+    assert cc.probe_bw_version == "BBRV2"
+    assert cc.state == "STARTUP"
+
+    # Competitor gone: MinRTT back near RTprop for THETA_R2 = 4 cruises.
+    pn, now = run_until_probe_bw(cc, pn, now)
+    for _ in range(60):
+        pn = run_round(cc, pn, now=now, rtt=0.05)
+        now += 0.1
+        if cc.probe_bw_version == "MINBBR":
+            break
+    assert cc.probe_bw_version == "MINBBR"
+    assert cc.state == "PROBE_BW"
+
+
+def test_probe_rtt_after_rtprop_expires():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = run_until_probe_bw(cc, 0, 0.0)
+    # No RTT sample at or below RTprop for more than 10 s.
+    now += 11.0
+    pn = run_round(cc, pn, now=now, rtt=0.06)
+    pn = run_round(cc, pn, now=now + 0.1, rtt=0.06)
     assert cc.state == "PROBE_RTT"
-    run_round(cc, pn, now=0.4, rtt=0.05)
+    assert cc.congestion_window == 4 * 1200
+    # After PROBE_RTT_DURATION with little in flight, return to PROBE_BW.
+    run_round(cc, pn, now=now + 0.5, rtt=0.06)
     assert cc.state == "PROBE_BW"
 
 
@@ -107,4 +188,13 @@ def test_loss_reduces_bandwidth_and_keeps_minimum_window():
     cc.on_packets_lost(now=1.0, packets=[])
     assert cc.state == "DRAIN"
     assert cc.btl_bw == btl_bw * 0.8
-    assert cc.congestion_window >= 2 * 1200
+    assert cc.congestion_window >= 4 * 1200
+
+
+def test_loss_response_at_most_once_per_round():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    run_round(cc, 0, now=0.0, rtt=0.05)
+    btl_bw = cc.btl_bw
+    cc.on_packets_lost(now=1.0, packets=[])
+    cc.on_packets_lost(now=1.01, packets=[])
+    assert cc.btl_bw == btl_bw * 0.8
