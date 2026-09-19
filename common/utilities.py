@@ -3,7 +3,6 @@
 The module includes small helpers for byte conversion, timestamps and
 human‑readable size formatting.
 """
-import time
 from datetime import datetime
 
 def now_timestamp() -> str:

@@ -9,12 +9,12 @@ from the optional environment variable `QUIC_LOG_LEVEL` (defaults to
 import logging
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         log_record = {
-            "timestamp": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "level": record.levelname,
             "name": record.name,
             "message": record.getMessage(),

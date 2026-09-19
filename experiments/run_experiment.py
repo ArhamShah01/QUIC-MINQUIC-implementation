@@ -10,9 +10,7 @@ stores the resulting metrics CSV file.
 """
 import argparse
 import asyncio
-import os
 import sys
-from datetime import datetime
 
 from .network_conditions import netem_conditions
 from quic.client import run_client

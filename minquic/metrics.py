@@ -8,8 +8,8 @@ import csv
 import json
 import os
 import threading
-from datetime import datetime
-from typing import Dict, List, Any
+from datetime import datetime, timezone
+from typing import Any
 
 class MetricsCollector:
     _instance = None
@@ -28,7 +28,7 @@ class MetricsCollector:
         Typical keys include:
         ``event``, ``timestamp``, ``value`` and any custom fields.
         """
-        entry = {"timestamp": datetime.utcnow().isoformat() + "Z"}
+        entry = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
         entry.update(kwargs)
         self._records.append(entry)
 

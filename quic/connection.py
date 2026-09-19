@@ -4,9 +4,7 @@ Provides a function to build an ``aioquic`` :class:`~aioquic.quic.configuration.
 for both client and server roles. For the server, a self‑signed TLS
 certificate is generated on‑the‑fly if the configured files are missing.
 """
-import os
 import subprocess
-import logging
 from pathlib import Path
 from aioquic.quic.configuration import QuicConfiguration
 from common.logger import get_logger

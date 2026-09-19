@@ -1,4 +1,3 @@
-import pytest
 from experiments.network_conditions import netem_conditions
 
 def test_netem_conditions(monkeypatch):

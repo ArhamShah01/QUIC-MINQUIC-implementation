@@ -9,7 +9,6 @@ not stop the main application.
 """
 import subprocess
 import shlex
-import logging
 from .logger import get_logger
 
 LOGGER = get_logger("common.network")

@@ -3,7 +3,6 @@
 The functions operate on ``aioquic.asyncio.QuicStream`` objects. They are thin
 wrappers that ensure the entire payload is transferred before returning.
 """
-import asyncio
 from typing import Any
 
 async def read_all(stream: Any) -> bytes:

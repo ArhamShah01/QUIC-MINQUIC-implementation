@@ -9,8 +9,6 @@ collector.
 import asyncio
 import os
 import subprocess
-import sys
-import time
 import yaml
 from aioquic.asyncio import serve
 from aioquic.quic.events import StreamDataReceived, ConnectionTerminated

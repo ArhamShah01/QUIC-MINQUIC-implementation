@@ -3,9 +3,8 @@
 MINBBR is an improved congestion control algorithm that introduces delay-awareness
 and BDP compensation to reduce throughput loss and latency.
 """
-import time
 import logging
-from typing import Dict, Any, Optional, List
+from typing import List
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.congestion.base import QuicCongestionControl
 
