@@ -11,6 +11,7 @@ import asyncio
 import os
 import yaml
 import time
+from datetime import datetime
 from aioquic.quic.events import StreamDataReceived, ConnectionTerminated
 from aioquic.asyncio import connect, QuicConnectionProtocol
 
@@ -45,7 +46,7 @@ class EchoClientProtocol(QuicConnectionProtocol):
     async def start(self) -> None:
         """Create streams, send payloads, and note start time.
         """
-        self._start_ts = time.time()
+        self._start_ts = time.perf_counter()
         for _ in range(self.total_streams):
             stream_id = self._quic.get_next_available_stream_id()
             # Send the payload and close the stream for writing.
@@ -104,24 +105,36 @@ async def run_client(cli_args=None):
     print(f"[DEBUG] Connecting to {host}:{port} as QUIC client")
     print(f"[INFO] Using configuration: host={host}, port={port}, payload_size={payload_size}, streams={streams}")
 
+    connect_ts = time.perf_counter()
     async with connect(
         host=host,
         port=port,
         configuration=quic_cfg,
         create_protocol=lambda *args, **kwargs: EchoClientProtocol(*args, payload=payload, total_streams=streams, **kwargs),
     ) as client:
+        # ``connect`` returns once the QUIC/TLS handshake has completed.
+        handshake_s = time.perf_counter() - connect_ts
         await client.start()
         await client.wait_done()
         # After client is done, gather stats.
-        elapsed = time.time() - client._start_ts
+        done_ts = time.perf_counter()
+        elapsed = done_ts - client._start_ts
+        total_s = done_ts - connect_ts
         total_received = sum(len(buf) for buf in client.responses.values())
+        goodput_mbps = total_received * 8 / elapsed / 1e6 if elapsed > 0 else None
         # Gather congestion and flow control stats from the underlying QUIC connection.
         cong_stats = get_congestion_stats(client._quic)
         flow_stats = get_flow_control_limits(client._quic)
         # Record metrics.
         metrics.record(
             event="client_complete",
-            elapsed_ms=int(elapsed * 1000),
+            protocol="minquic",
+            handshake_ms=round(handshake_s * 1000, 3),
+            transfer_ms=round(elapsed * 1000, 3),
+            total_ms=round(total_s * 1000, 3),
+            # Alias of transfer_ms, kept for older result files.
+            elapsed_ms=round(elapsed * 1000, 3),
+            goodput_mbps=goodput_mbps,
             bytes_sent=payload_size * streams,
             bytes_received=total_received,
             congestion_window=cong_stats.get("congestion_window"),
@@ -133,7 +146,9 @@ async def run_client(cli_args=None):
         )
         print("[INFO] Metrics recorded:")
         print("___________________________________________")
-        print(f"  elapsed_ms={int(elapsed * 1000)}")
+        print(f"  handshake_ms={handshake_s * 1000:.3f}")
+        print(f"  transfer_ms={elapsed * 1000:.3f}")
+        print(f"  goodput_mbps={goodput_mbps:.3f}")
         print(f"  bytes_sent={payload_size * streams}")
         print(f"  bytes_received={total_received}")
         print(f"  congestion_window={cong_stats.get('congestion_window')}")
@@ -146,8 +161,8 @@ async def run_client(cli_args=None):
                 print(f"  {key}={value}")
         print("___________________________________________\n")
         LOGGER.info("Client finished: %d streams, %d bytes sent, %d bytes received, %.2f s elapsed", streams, payload_size * streams, total_received, elapsed)
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        out_path = os.path.join(cfg["metrics"]["output_dir"], f"client_{timestamp}.csv")
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        out_path = os.path.join(cfg["metrics"]["output_dir"], f"minquic_client_{timestamp}.csv")
         metrics.dump_csv(out_path)
         print(f"[INFO] Metrics dumped to CSV: {out_path}")
 

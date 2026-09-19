@@ -39,10 +39,10 @@ class MetricsCollector:
             return
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
-            fieldnames = set()
+            # Columns in first-seen order, so every run has the same layout.
+            fieldnames = []
             for rec in self._records:
-                fieldnames.update(rec.keys())
-            fieldnames = list(fieldnames)
+                fieldnames.extend(k for k in rec if k not in fieldnames)
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             for rec in self._records:
