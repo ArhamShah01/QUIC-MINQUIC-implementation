@@ -8,6 +8,7 @@ recorded via the shared ``MetricsCollector``.
 import argparse
 
 import asyncio
+import csv
 import os
 import yaml
 import time
@@ -165,11 +166,25 @@ async def run_client(cli_args=None):
         out_path = os.path.join(cfg["metrics"]["output_dir"], f"minquic_client_{timestamp}.csv")
         metrics.dump_csv(out_path)
         print(f"[INFO] Metrics dumped to CSV: {out_path}")
+        if cli_args is not None and getattr(cli_args, "trace", False):
+            trace_path = os.path.join(cfg["metrics"]["output_dir"], f"minquic_trace_{timestamp}.csv")
+            _dump_trace(client._quic._loss._cc.trace, trace_path)
+            print(f"[INFO] MINBBR per-round trace dumped to CSV: {trace_path}")
+
+def _dump_trace(rows, path):
+    """Write the MINBBR per-round trace (one row per round trip)."""
+    if not rows:
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
 
 def main():
     parser = argparse.ArgumentParser(description="QUIC client")
     parser.add_argument("--payload-size", type=int, help="Payload size in bytes")
     parser.add_argument("--streams", type=int, help="Number of streams")
+    parser.add_argument("--trace", action="store_true", help="Also write MINBBR's per-round trace CSV")
     args = parser.parse_args()
     asyncio.run(run_client(args))
 

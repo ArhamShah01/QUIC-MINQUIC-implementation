@@ -7,6 +7,7 @@ The algorithm is registered with aioquic under the name ``"minbbr"``; select it
 by setting ``QuicConfiguration.congestion_control_algorithm = "minbbr"``.
 """
 import logging
+import math
 from typing import Iterable
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.congestion.base import (
@@ -44,14 +45,25 @@ PROBE_RTT_DURATION = 0.2  # seconds
 # this flow built in UP, so MinRTT measured in CRUISE reflects other traffic.
 PROBE_BW_PHASES = ("DOWN", "CRUISE", "REFILL", "UP")
 CRUISE_ROUNDS = 6
+# The paper gives no cwnd gains; these are implementation choices. UP uses
+# BBR's 1.25 probing gain: with the window as the only control, larger gains
+# overflow the bottleneck queue every cycle. CRUISE keeps a little above one
+# BDP in flight so ACK timing does not idle the link, while staying below
+# Algorithm 2's PHI_R1 threshold so the flow's own queue is not mistaken for
+# a competitor.
 PROBE_BW_CWND_GAINS = {
     # Aggressive probing when no loss-based competitor is detected.
-    "MINBBR": {"DOWN": 0.75, "CRUISE": 1.0, "REFILL": 1.0, "UP": 2.0},
+    "MINBBR": {"DOWN": 0.75, "CRUISE": 1.1, "REFILL": 1.0, "UP": 1.25},
     # BBRv2-compatible: gentler probing and headroom in CRUISE, which leaves
     # queue space for loss-based flows.
     "BBRV2": {"DOWN": 0.75, "CRUISE": 0.85, "REFILL": 1.0, "UP": 1.25},
 }
 DRAIN_CWND_GAIN = 1.0
+
+# Loss response (implementation choice, BBRv2-style): once per round with
+# loss, cap the model bandwidth at LOSS_BW_FACTOR of its current value. The
+# cap is short-term and is lifted when ProbeBW next enters REFILL.
+LOSS_BW_FACTOR = 0.8
 
 INITIAL_WINDOW_PACKETS = 10
 MIN_WINDOW_PACKETS = 4
@@ -81,6 +93,7 @@ class MinBbrCongestionControl(QuicCongestionControl):
 
         # Path model
         self.btl_bw = 0.0  # bytes/s, max of btl_bw_filter
+        self.bw_lo = math.inf  # bytes/s, short-term cap after loss
         self.rtprop = None  # seconds, min RTT seen; None until the first sample
         self._rtprop_stamp = 0.0
         self._rtprop_expired = False
@@ -100,11 +113,14 @@ class MinBbrCongestionControl(QuicCongestionControl):
         self._cruise_min_rtt = None
         self._loss_round = None  # round of the last loss response
 
-        # Delivery-rate sampling: bytes delivered so far, when the latest ACK
-        # arrived, and per in-flight packet the values at the time it was sent.
+        # Delivery-rate sampling (as in BBR): bytes delivered so far, when the
+        # latest ACK arrived, the send time of the latest acked packet, and
+        # per in-flight packet the values at the time it was sent.
         self._delivered = 0
         self._delivered_time = None
-        self._packet_state = {}  # (epoch, packet_number) -> (delivered, delivered_time)
+        self._first_sent_time = None
+        # (epoch, packet_number) -> (delivered, delivered_time, first_sent_time)
+        self._packet_state = {}
 
         # Round trips: a round ends when a packet sent after the previous
         # round ended is acknowledged.
@@ -116,7 +132,19 @@ class MinBbrCongestionControl(QuicCongestionControl):
         # per round, covering the last BTLBW_FILTER_ROUNDS rounds.
         self.btl_bw_filter = []
 
+        # One row per round trip, for plotting MINBBR's behaviour over time.
+        self.trace = []
+
     # --- Path model ---
+
+    @property
+    def model_bw(self) -> float:
+        """Bandwidth used for BDP: BtlBW, capped by bw_lo after loss."""
+        return min(self.btl_bw, self.bw_lo)
+
+    def _update_bdp(self) -> None:
+        if self.rtprop is not None:
+            self.bdp = self.model_bw * self.rtprop
 
     def _on_bandwidth_sample(self, bw: float) -> None:
         """Add a delivery-rate sample to the current round's filter entry."""
@@ -131,8 +159,7 @@ class MinBbrCongestionControl(QuicCongestionControl):
         oldest_round = self.round_count - BTLBW_FILTER_ROUNDS + 1
         self.btl_bw_filter = [e for e in self.btl_bw_filter if e[0] >= oldest_round]
         self.btl_bw = max((bw for _, bw in self.btl_bw_filter), default=0.0)
-        if self.rtprop is not None:
-            self.bdp = self.btl_bw * self.rtprop
+        self._update_bdp()
 
     def _apply_min_btlbw_filter(self) -> None:
         """Algorithm 1: discard the oldest BtlBW sample after a jittery round."""
@@ -210,8 +237,25 @@ class MinBbrCongestionControl(QuicCongestionControl):
         index = PROBE_BW_PHASES.index(self.probe_bw_phase)
         self.probe_bw_phase = PROBE_BW_PHASES[(index + 1) % len(PROBE_BW_PHASES)]
         self._phase_rounds = 0
+        if self.probe_bw_phase == "REFILL":
+            # Start of a new probing cycle: lift the short-term loss cap.
+            self.bw_lo = math.inf
+            self._update_bdp()
 
-    def _on_round_end(self) -> None:
+    def _on_round_end(self, now: float) -> None:
+        self.trace.append({
+            "time": now,
+            "round": self.round_count,
+            "state": self.state,
+            "phase": self.probe_bw_phase,
+            "version": self.probe_bw_version,
+            "cwnd": self.congestion_window,
+            "bytes_in_flight": self.bytes_in_flight,
+            "btl_bw": self.btl_bw,
+            "bw_lo": None if math.isinf(self.bw_lo) else self.bw_lo,
+            "rtprop": self.rtprop,
+            "round_min_rtt": self._round_min_rtt,
+        })
         if self.rtprop is not None and self._round_min_rtt is not None:
             self._apply_min_btlbw_filter()
         if self.state == "PROBE_BW":
@@ -276,10 +320,10 @@ class MinBbrCongestionControl(QuicCongestionControl):
         ``congestion_window`` and the smoothed RTT.
         """
         if self.state == "PROBE_BW" and self.probe_bw_phase == "UP":
-            return self.btl_bw * 1.25  # Probe above bottleneck
+            return self.model_bw * 1.25  # Probe above bottleneck
         if self.state == "PROBE_BW" and self.probe_bw_phase == "DOWN":
-            return self.btl_bw * 0.75  # Drain the queue built while probing
-        return self.btl_bw
+            return self.model_bw * 0.75  # Drain the queue built while probing
+        return self.model_bw
 
     # --- aioquic QuicCongestionControl interface ---
 
@@ -290,32 +334,38 @@ class MinBbrCongestionControl(QuicCongestionControl):
 
         state = self._packet_state.pop((packet.epoch, packet.packet_number), None)
         if state is not None:
-            delivered_at_send, delivered_time_at_send = state
+            delivered_at_send, delivered_time_at_send, first_sent_at_send = state
 
             # Delivery rate: bytes acknowledged since this packet was sent,
-            # over the time between the ACK before it was sent and this ACK.
-            if delivered_time_at_send is not None:
-                interval = now - delivered_time_at_send
-                if interval > 0:
-                    self._on_bandwidth_sample(
-                        (self._delivered - delivered_at_send) / interval
-                    )
+            # over the longer of the send and ACK intervals, so bunched ACKs
+            # cannot inflate the estimate. Samples shorter than RTprop are
+            # also distorted by ACK bunching and are discarded.
+            send_elapsed = packet.sent_time - first_sent_at_send
+            ack_elapsed = now - delivered_time_at_send
+            interval = max(send_elapsed, ack_elapsed)
+            self._first_sent_time = packet.sent_time
+            if interval > 0 and (self.rtprop is None or interval >= self.rtprop):
+                self._on_bandwidth_sample(
+                    (self._delivered - delivered_at_send) / interval
+                )
 
             if delivered_at_send >= self._next_round_delivered:
                 self._next_round_delivered = self._delivered
-                self._on_round_end()
+                self._on_round_end(now)
 
         self._update_state(now)
         self._update_congestion_window(packet.sent_bytes)
 
     def on_packet_sent(self, *, packet: QuicSentPacket) -> None:
-        self.bytes_in_flight += packet.sent_bytes
-        if self._delivered_time is None:
-            # Nothing acked yet: measure the first samples from the send time.
+        if self.bytes_in_flight == 0:
+            # Nothing in flight (start or after idle): measure from now.
             self._delivered_time = packet.sent_time
+            self._first_sent_time = packet.sent_time
+        self.bytes_in_flight += packet.sent_bytes
         self._packet_state[(packet.epoch, packet.packet_number)] = (
             self._delivered,
             self._delivered_time,
+            self._first_sent_time,
         )
 
     def on_packets_expired(self, *, packets: Iterable[QuicSentPacket]) -> None:
@@ -332,12 +382,11 @@ class MinBbrCongestionControl(QuicCongestionControl):
         if self._loss_round == self.round_count:
             return
         self._loss_round = self.round_count
-        # Cut the filter samples too, or the next update would undo the cut.
-        self.btl_bw_filter = [(r, bw * 0.8) for r, bw in self.btl_bw_filter]
-        self._update_btl_bw()
-        if self.state != "PROBE_RTT":
+        self.bw_lo = LOSS_BW_FACTOR * self.model_bw
+        self._update_bdp()
+        if self.state == "STARTUP":
+            # Loss means the pipe is full: stop growing and drain the queue.
             self.state = "DRAIN"
-            self.probe_bw_phase = None
             self._full_bw_reached = True
         self.congestion_window = min(self.congestion_window, self.get_congestion_window())
 
@@ -352,7 +401,7 @@ class MinBbrCongestionControl(QuicCongestionControl):
             self._rtprop_stamp = now
         if self._round_min_rtt is None or rtt < self._round_min_rtt:
             self._round_min_rtt = rtt
-        self.bdp = self.btl_bw * self.rtprop
+        self._update_bdp()
 
     def get_log_data(self) -> dict:
         data = super().get_log_data()
@@ -381,6 +430,7 @@ def get_congestion_stats(conn: QuicConnection) -> dict:
     if isinstance(cc, MinBbrCongestionControl):
         stats.update({
             "minbbr_btl_bw": cc.btl_bw,
+            "minbbr_bw_lo": None if math.isinf(cc.bw_lo) else cc.bw_lo,
             "minbbr_rtprop": cc.rtprop,
             "minbbr_bdp": cc.bdp,
             "minbbr_state": cc.state,

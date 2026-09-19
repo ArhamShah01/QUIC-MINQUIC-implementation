@@ -2,7 +2,7 @@
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.congestion.reno import RenoCongestionControl
 
-from minquic.congestion import MinBbrCongestionControl
+from minquic.congestion import PROBE_BW_CWND_GAINS, MinBbrCongestionControl
 from minquic.connection import create_quic_configuration as minquic_configuration
 from quic.connection import create_quic_configuration as quic_configuration
 
@@ -109,10 +109,11 @@ def test_probe_bw_cycles_through_phases():
 def test_probe_bw_window_gain_follows_phase():
     cc = MinBbrCongestionControl(max_datagram_size=1200)
     run_until_probe_bw(cc, 0, 0.0)
-    cc.probe_bw_phase = "UP"
-    assert cc.get_congestion_window() == int(cc.bdp * 2.0)
-    cc.probe_bw_phase = "DOWN"
-    assert cc.get_congestion_window() == max(int(cc.bdp * 0.75), 4 * 1200)
+    gains = PROBE_BW_CWND_GAINS["MINBBR"]
+    for phase in ("UP", "CRUISE", "DOWN"):
+        cc.probe_bw_phase = phase
+        assert cc.get_congestion_window() == max(int(cc.bdp * gains[phase]), 4 * 1200)
+    assert gains["UP"] > gains["CRUISE"] > gains["DOWN"]
 
 
 def test_algorithm2_switches_to_bbrv2_and_back():
@@ -181,13 +182,17 @@ def test_btl_bw_filter_window_expires_old_samples():
     assert cc.btl_bw < fast
 
 
-def test_loss_reduces_bandwidth_and_keeps_minimum_window():
+def test_loss_in_startup_caps_bandwidth_and_drains():
     cc = MinBbrCongestionControl(max_datagram_size=1200)
     run_round(cc, 0, now=0.0, rtt=0.05)
     btl_bw = cc.btl_bw
     cc.on_packets_lost(now=1.0, packets=[])
     assert cc.state == "DRAIN"
-    assert cc.btl_bw == btl_bw * 0.8
+    # The filter is untouched; the loss only sets the short-term cap.
+    assert cc.btl_bw == btl_bw
+    assert cc.bw_lo == btl_bw * 0.8
+    assert cc.model_bw == btl_bw * 0.8
+    assert cc.bdp == cc.model_bw * cc.rtprop
     assert cc.congestion_window >= 4 * 1200
 
 
@@ -197,4 +202,43 @@ def test_loss_response_at_most_once_per_round():
     btl_bw = cc.btl_bw
     cc.on_packets_lost(now=1.0, packets=[])
     cc.on_packets_lost(now=1.01, packets=[])
-    assert cc.btl_bw == btl_bw * 0.8
+    assert cc.bw_lo == btl_bw * 0.8
+
+
+def test_loss_in_probe_bw_keeps_state_and_cap_lifts_at_refill():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = run_until_probe_bw(cc, 0, 0.0)
+    cc.on_packets_lost(now=now, packets=[])
+    assert cc.state == "PROBE_BW"
+    assert cc.bw_lo < cc.btl_bw
+    for _ in range(10):
+        pn = run_round(cc, pn, now=now, rtt=0.05)
+        now += 0.1
+        if cc.probe_bw_phase == "REFILL":
+            break
+    assert cc.probe_bw_phase == "REFILL"
+    assert cc.model_bw == cc.btl_bw
+
+
+def test_trace_has_one_row_per_round():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = 0, 0.0
+    for _ in range(5):
+        pn = run_round(cc, pn, now=now, rtt=0.05)
+        now += 0.1
+    assert [row["round"] for row in cc.trace] == list(range(cc.round_count))
+    assert {"time", "state", "phase", "version", "cwnd", "btl_bw", "rtprop"} <= set(cc.trace[0])
+
+
+def test_samples_shorter_than_rtprop_are_discarded():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    run_round(cc, 0, now=0.0, rtt=0.05)  # RTprop = 50 ms
+    filter_before = list(cc.btl_bw_filter)
+    # A burst acked 5 ms after sending would claim 2,000,000 bytes/s.
+    sent = [FakePacket(10 + i, sent_time=1.0) for i in range(10)]
+    for packet in sent:
+        cc.on_packet_sent(packet=packet)
+    for packet in sent:
+        cc.on_packet_acked(now=1.005, packet=packet)
+    new_samples = [bw for r, bw in cc.btl_bw_filter if (r, bw) not in filter_before]
+    assert new_samples == []
