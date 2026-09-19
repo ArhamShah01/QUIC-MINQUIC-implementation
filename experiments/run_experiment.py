@@ -6,7 +6,7 @@ Typical usage::
     python -m experiments.run_experiment --protocol both --runs 5 \\
         --loss 1 --latency 25 --jitter 5 --bandwidth 20 --queue 1000
 
-    # The predefined condition grid (see GRID below)
+    # The predefined condition grid (see BASELINE and GRID_FACTORS below)
     python -m experiments.run_experiment --protocol both --grid
 
 For every run the matching server is started as a subprocess and the client
@@ -19,8 +19,8 @@ mid-sweep. ``--dry-run`` prints the tc commands and runs without netem.
 On the loopback interface netem delays each direction, so RTT = 2 x latency.
 """
 import argparse
+import contextlib
 import csv
-import os
 import subprocess
 import sys
 import time
@@ -145,11 +145,10 @@ def main() -> None:
         print(f"[INFO] Condition: {condition}")
         if args.dry_run:
             print(f"[DRY-RUN] {build_netem_command(args.interface, **condition)}")
-            netem = None
+            netem = contextlib.nullcontext()
         else:
             netem = netem_conditions(args.interface, **condition)
-            netem.__enter__()
-        try:
+        with netem:
             for run in range(1, args.runs + 1):
                 # Alternate protocols within a run so both see the same drift.
                 for protocol in protocols:
@@ -161,9 +160,6 @@ def main() -> None:
                           + (f", goodput {float(record['goodput_mbps']):.2f} Mbit/s"
                              if record["status"] == "ok" else ""))
                     _write_sweep(sweep_path, rows)
-        finally:
-            if netem is not None:
-                netem.__exit__(None, None, None)
     print(f"[INFO] Sweep results: {sweep_path}")
 
 
