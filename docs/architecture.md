@@ -2,14 +2,13 @@
 
 The project is organized around a clear separation of concerns:
 
-- **common/** – generic utilities that are independent of the QUIC implementation (logging, network‑condition helpers, miscellaneous helpers).
+- **common/** – generic utilities that are independent of the QUIC implementation (logging, network‑condition helpers).
 - **quic/** – the baseline QUIC implementation. It contains thin wrappers around the **aioquic** library and provides a modular API:
   - ``connection.py`` – builds the ``QuicConfiguration`` (TLS handling).
   - ``server.py`` – launches a QUIC echo server.
   - ``client.py`` – launches a QUIC client that can open multiple streams.
   - ``metrics.py`` – central collector for experiment results.
-  - ``stream.py`` – low‑level async read/write helpers used by both client and server.
-  - ``reliability.py`` / ``congestion.py`` / ``flow_control.py`` – expose internal QUIC state for later analysis and for MINQUIC extensions.
+  - ``congestion.py`` / ``flow_control.py`` – expose internal QUIC state (congestion window, RTT, flow‑control limits) for analysis.
 - **experiments/** – utilities for reproducible network experiments, including a ``run_experiment`` script that applies ``tc netem`` settings before invoking the client.
 - **tests/** – pytest suite that currently performs basic sanity checks; integration tests can be expanded to spin up the server and verify multi‑stream behaviour.
 - **docs/** – documentation describing the architecture, the baseline QUIC implementation, the MINQUIC extension plan, and experiment methodology.

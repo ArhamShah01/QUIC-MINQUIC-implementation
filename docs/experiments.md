@@ -42,7 +42,7 @@ compare the QUIC baseline with the forthcoming MINQUIC implementation.
 | ``transfer_time_ms`` | Duration of payload transmission and echo reception |
 | ``throughput_bytes_per_sec`` | Calculated from total bytes transferred over ``transfer_time_ms`` |
 | ``rtt_ms`` | Approximate round‑trip time derived from timestamps |
-| ``packets_sent`` / ``packets_received`` | Counts of QUIC packets observed (exposed via ``reliability.py``) |
+| ``packets_sent`` / ``packets_received`` | Counts of QUIC packets observed (from Wireshark captures) |
 | ``retransmissions`` | Number of packets retransmitted (if any) |
 | ``congestion_window`` | Current congestion window size during the experiment |
 

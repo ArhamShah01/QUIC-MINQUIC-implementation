@@ -30,28 +30,27 @@ comp_networks/
 │
 ├─ common/
 │   ├─ logger.py                 # Structured logger
-│   ├─ network.py                # Netem helpers for experiment emulation
-│   └─ utilities.py              # Misc helper functions
+│   └─ network.py                # Netem helpers for experiment emulation
 │
 ├─ quic/
 │   ├─ __init__.py
 │   ├─ client.py                # QUIC client entry‑point
 │   ├─ server.py                # QUIC server entry‑point
 │   ├─ connection.py            # Helper to build aioquic configuration
-│   ├─ packet.py                # Placeholder for future packet metadata
-│   ├─ stream.py                # Async read/write helpers for raw streams
-│   ├─ reliability.py            # Reliability‑related stats (thin wrapper)
 │   ├─ congestion.py            # Congestion‑control exposure
 │   ├─ flow_control.py          # Flow‑control exposure
 │   └─ metrics.py               # Central metrics collector
 │
-├─ minquic/                     # Will be populated after QUIC baseline
-│   └─ (mirrored structure, initially empty)
+├─ minquic/                     # MINQUIC: same layout, MINBBR congestion control
+│   └─ congestion.py            # MINBBR implementation (registered as "minbbr")
 │
 ├─ tests/
 │   ├─ conftest.py              # Pytest fixtures for server lifecycle
 │   ├─ test_connection.py       # Handshake & basic stream tests
-│   └─ test_multi_stream.py    # Multi‑stream correctness tests
+│   ├─ test_integration.py      # End-to-end QUIC and MINQUIC runs
+│   ├─ test_minbbr.py           # MINBBR congestion-control unit tests
+│   ├─ test_multi_stream.py     # Multi‑stream correctness tests
+│   └─ test_netem.py            # Netem helper tests
 │
 ├─ experiments/
 │   ├─ run_experiment.py        # Run client under netem conditions

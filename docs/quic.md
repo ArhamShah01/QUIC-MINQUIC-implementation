@@ -23,13 +23,12 @@ congestion control, etc.).
   (elapsed time, bytes sent/received, etc.) are stored via the shared
   ``MetricsCollector``.
 
-- **stream.py** – Provides ``read_all`` and ``write_all`` helpers for
-  ``aioquic`` stream objects, handling flow‑control automatically.
-
 - **metrics.py** – Singleton that aggregates metric dictionaries and can
-  dump them to CSV or JSON files for later analysis.\n- **reliability.py**, **congestion.py**, **flow_control.py** – Thin wrappers that
-  expose internal ``QuicConnection`` state (retransmission counters, congestion
-  window, RTT, flow‑control limits). These are useful for experiment reporting
+  dump them to CSV or JSON files for later analysis.
+
+- **congestion.py**, **flow_control.py** – Thin wrappers that
+  expose internal ``QuicConnection`` state (congestion window, bytes in
+  flight, RTT, flow‑control limits). These are useful for experiment reporting
   and will be extended in the MINQUIC phase.
 
 ## How It Works
@@ -51,7 +50,7 @@ congestion control, etc.).
 
 The modular layout makes it straightforward to replace or augment any component:
 - Swap ``EchoQuicProtocol`` for a more complex application protocol.
-- Add per‑packet logging in ``packet.py``.
+- Add per‑packet logging.
 - Replace the congestion‑control wrapper with a custom algorithm for MINQUIC.
 - Insert additional experiment parameters (e.g., packet reordering) by extending
   ``network_conditions`` and the configuration file.
@@ -112,7 +111,7 @@ These metrics enable direct comparison between the baseline QUIC implementation 
 
 The modular layout makes it straightforward to replace or augment any component:
 - Swap ``EchoQuicProtocol`` for a more complex application protocol.
-- Add per‑packet logging in ``packet.py``.
+- Add per‑packet logging.
 - Replace the congestion‑control wrapper with a custom algorithm for MINQUIC.
 - Insert additional experiment parameters (e.g., packet reordering) by extending
   ``network_conditions`` and the configuration file.
