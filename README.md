@@ -1,6 +1,6 @@
-# QUIC Baseline Project
+# QUIC and MINQUIC
 
-This repository implements a functional QUIC baseline in Python using the **aioquic** library. The implementation focuses on raw QUIC stream operations, structured logging, and metric collection to enable reproducible networking experiments.
+This repository implements a QUIC baseline in Python using the **aioquic** library, and **MINQUIC**, which replaces the congestion control with **MINBBR** (Sun, BDICN 2023). Both share the same echo server, multi-stream client, structured logging and metric collection, so they can be compared under identical network conditions.
 
 ## Quick Start
 ```bash
@@ -17,7 +17,19 @@ python -m quic.server
 python -m quic.client --payload-size 1024 --streams 3
 ```
 
-The client will connect, send data over the requested number of streams, and print a summary of performance metrics.
+The client will connect, send data over the requested number of streams, and print a summary of performance metrics. Use ``minquic.server`` / ``minquic.client`` the same way to run MINQUIC.
+
+## Comparing QUIC and MINQUIC
+```bash
+sudo -v   # netem needs root
+python -m experiments.run_experiment --protocol both --grid
+```
+This runs both protocols under a grid of netem conditions and writes ``experiments/results/sweep_<timestamp>.csv``. See ``docs/experiments.md`` for the options and output, and ``docs/minquic.md`` for how MINBBR is implemented.
+
+## Tests
+```bash
+python -m pytest
+```
 
 ## Project Layout
 ```
