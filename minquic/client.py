@@ -14,7 +14,7 @@ import time
 from aioquic.quic.events import StreamDataReceived, ConnectionTerminated
 from aioquic.asyncio import connect, QuicConnectionProtocol
 
-from .connection import create_quic_configuration, apply_congestion_control
+from .connection import create_quic_configuration
 from .metrics import metrics
 from .congestion import get_congestion_stats
 from .flow_control import get_flow_control_limits
@@ -35,8 +35,6 @@ class EchoClientProtocol(QuicConnectionProtocol):
 
     def __init__(self, *args, payload: bytes, total_streams: int, **kwargs):
         super().__init__(*args, **kwargs)
-        apply_congestion_control(self._quic, "minbbr")
-        LOGGER.info("MINBBR applied to client connection during init")
         self.payload = payload
         self.total_streams = total_streams
         self.responses = {}
@@ -131,6 +129,7 @@ async def run_client(cli_args=None):
             rtt=cong_stats.get("rtt"),
             max_data=flow_stats.get("max_data"),
             max_stream_data=flow_stats.get("max_stream_data"),
+            **{k: v for k, v in cong_stats.items() if k.startswith("minbbr_")},
         )
         print("[INFO] Metrics recorded:")
         print("___________________________________________")
@@ -142,6 +141,9 @@ async def run_client(cli_args=None):
         print(f"  rtt={cong_stats.get('rtt')}")
         print(f"  max_data={flow_stats.get('max_data')}")
         print(f"  max_stream_data={flow_stats.get('max_stream_data')}")
+        for key, value in cong_stats.items():
+            if key.startswith("minbbr_"):
+                print(f"  {key}={value}")
         print("___________________________________________\n")
         LOGGER.info("Client finished: %d streams, %d bytes sent, %d bytes received, %.2f s elapsed", streams, payload_size * streams, total_received, elapsed)
         timestamp = time.strftime("%Y%m%d-%H%M%S")

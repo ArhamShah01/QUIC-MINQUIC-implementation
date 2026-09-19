@@ -7,9 +7,9 @@ certificate is generated on‑the‑fly if the configured files are missing.
 import subprocess
 from pathlib import Path
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.connection import QuicConnection
 from common.logger import get_logger
-from minquic.congestion import MinBbrCongestionControl
+# Imported for its side effect: registers "minbbr" with aioquic.
+import minquic.congestion  # noqa: F401
 
 LOGGER = get_logger("minquic.connection")
 
@@ -46,22 +46,6 @@ def _generate_self_signed_cert(cert_path: Path, key_path: Path) -> None:
         LOGGER.error("Failed to generate self‑signed certificate: %s", exc)
         raise
 
-def apply_congestion_control(conn: QuicConnection, algorithm: str) -> None:
-    """
-    Injects a custom congestion control algorithm into the QuicConnection.
-
-    Since aioquic's QuicConfiguration doesn't support arbitrary custom classes
-    via strings, we manually replace the internal congestion control object.
-    """
-    if algorithm == "minbbr":
-        LOGGER.info("Activating MINBBR congestion control")
-        # aioquic's internal attribute is _congestion_control
-        # It requires max_datagram_size for initialization
-        max_dg_size = getattr(conn, "max_datagram_size", 1450)
-        conn._congestion_control = MinBbrCongestionControl(max_datagram_size=max_dg_size)
-    else:
-        LOGGER.warning("Unknown congestion algorithm '%s', using default", algorithm)
-
 def create_quic_configuration(is_client: bool, cert_path: str | None = None, key_path: str | None = None) -> QuicConfiguration:
     """Create and return a :class:`~aioquic.quic.configuration.QuicConfiguration`.
 
@@ -76,6 +60,7 @@ def create_quic_configuration(is_client: bool, cert_path: str | None = None, key
         defined in the project's ``config.yaml``.
     """
     cfg = QuicConfiguration(is_client=is_client, alpn_protocols=["hq-29"])
+    cfg.congestion_control_algorithm = "minbbr"
     if not is_client:
         # Server mode – ensure we have a certificate and key.
         if not cert_path or not key_path:

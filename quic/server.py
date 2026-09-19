@@ -75,7 +75,6 @@ class EchoQuicProtocol(QuicConnectionProtocol):
             )
             LOGGER.info("Connection terminated: error_code=%s", event.error_code)
             print(f"[INFO] Connection terminated: error_code={event.error_code}")
-            print(f"[INFO] Connection terminated: error_code={event.error_code}")
             print("[INFO] Final stats:")
             print(f"  congestion_window={cong_stats.get('congestion_window')}")
             print(f"  bytes_in_flight={cong_stats.get('bytes_in_flight')}")

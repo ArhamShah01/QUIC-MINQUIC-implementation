@@ -14,7 +14,7 @@ from aioquic.asyncio import serve
 from aioquic.quic.events import StreamDataReceived, ConnectionTerminated
 from aioquic.asyncio import QuicConnectionProtocol
 
-from .connection import create_quic_configuration, apply_congestion_control
+from .connection import create_quic_configuration
 from .metrics import metrics
 from .congestion import get_congestion_stats
 from .flow_control import get_flow_control_limits
@@ -47,11 +47,6 @@ class EchoQuicProtocol(QuicConnectionProtocol):
     stream handling without any application‑level framing.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        apply_congestion_control(self._quic, "minbbr")
-        LOGGER.info("MINBBR applied to server connection during init")
-
     def quic_event_received(self, event):
         if isinstance(event, StreamDataReceived):
             # Echo the payload back on the same stream.
@@ -66,9 +61,6 @@ class EchoQuicProtocol(QuicConnectionProtocol):
             )
             print(f"[INFO] Echoed {len(event.data)} bytes on stream {event.stream_id} (end_stream={event.end_stream})")
         elif isinstance(event, ConnectionTerminated):
-            # Activate MINBBR if not already done (usually handled at connection start)
-            # but we ensure it's active for metrics reporting here if needed.
-
             # Record final congestion and flow control stats
             cong_stats = get_congestion_stats(self._quic)
             flow_stats = get_flow_control_limits(self._quic)
@@ -82,7 +74,6 @@ class EchoQuicProtocol(QuicConnectionProtocol):
                 max_stream_data=flow_stats.get("max_stream_data"),
             )
             LOGGER.info("Connection terminated: error_code=%s", event.error_code)
-            print(f"[INFO] Connection terminated: error_code={event.error_code}")
             print(f"[INFO] Connection terminated: error_code={event.error_code}")
             print("[INFO] Final stats:")
             print(f"  congestion_window={cong_stats.get('congestion_window')}")
