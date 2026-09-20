@@ -270,7 +270,9 @@ def test_trace_has_one_row_per_round():
         pn = run_round(cc, pn, now=now, rtt=0.05)
         now += 0.1
     assert [row["round"] for row in cc.trace] == list(range(cc.round_count))
-    assert {"time", "state", "phase", "version", "cwnd", "btl_bw", "rtprop"} <= set(cc.trace[0])
+    assert {"time", "round_s", "delivered_bytes", "lost_bytes", "state", "phase",
+            "version", "cwnd", "btl_bw", "rtprop"} <= set(cc.trace[0])
+    assert cc.trace[-1]["delivered_bytes"] > 0
 
 
 def test_samples_shorter_than_rtprop_are_discarded():
