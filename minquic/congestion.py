@@ -123,6 +123,7 @@ class MinBbrCongestionControl(QuicCongestionControl):
         self._round_lost_bytes = 0
         self._round_start_delivered = 0
         self._drain_rounds = 0
+        self._last_round_time = None
 
         # Delivery-rate sampling (as in BBR): bytes delivered so far, when the
         # latest ACK arrived, the send time of the latest acked packet, and
@@ -274,6 +275,11 @@ class MinBbrCongestionControl(QuicCongestionControl):
     def _on_round_end(self, now: float) -> None:
         self.trace.append({
             "time": now,
+            # Round duration: much longer than the RTT means the sender stalled
+            # (for example waiting out a probe timeout).
+            "round_s": None if self._last_round_time is None else round(now - self._last_round_time, 4),
+            "delivered_bytes": self._delivered - self._round_start_delivered,
+            "lost_bytes": self._round_lost_bytes,
             "round": self.round_count,
             "state": self.state,
             "phase": self.probe_bw_phase,
@@ -285,6 +291,7 @@ class MinBbrCongestionControl(QuicCongestionControl):
             "rtprop": self.rtprop,
             "round_min_rtt": self._round_min_rtt,
         })
+        self._last_round_time = now
         self._apply_loss_response()
         if self.state == "DRAIN":
             self._drain_rounds += 1
