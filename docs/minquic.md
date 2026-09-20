@@ -29,7 +29,7 @@ window, using a gain relative to the estimated BDP in each state.
 | State | Behaviour | Exit |
 | ----- | --------- | ---- |
 | STARTUP | Window grows by every acknowledged byte (doubles per round) | BtlBW grows < 25 % for 3 rounds, or loss |
-| DRAIN | Window 1 × BDP | Bytes in flight ≤ BDP |
+| DRAIN | Window 1 × BDP | Bytes in flight ≤ BDP, or 2 rounds |
 | PROBE_BW | Cycles DOWN → CRUISE (6 rounds) → REFILL → UP, one round each otherwise | RTprop expiry → PROBE_RTT |
 | PROBE_RTT | Window 4 packets for 200 ms | Back to PROBE_BW (or STARTUP) |
 
@@ -58,7 +58,8 @@ overflowed the bottleneck queue on every cycle.
 | STARTUP exit after 3 rounds on a BtlBW plateau | Paper (BBR background), 25 % growth threshold from BBR |
 | ProbeBW sub-states DOWN / CRUISE / REFILL / UP | BBRv2, as referenced by the paper |
 | Window gains per phase and mode (table above) | **Implementation choice** (the paper gives none) |
-| Loss response: once per round with loss, ``bw_lo`` = 0.8 × current model bandwidth; lifted at the next REFILL; loss ends STARTUP | **Implementation choice**, modelled on BBRv2's ``bw_lo`` |
+| Loss response: at the end of a round whose loss rate exceeded 2 %, ``bw_lo`` = 0.8 × current model bandwidth; lifted at the next REFILL; such a round also ends STARTUP | **Implementation choice**, modelled on BBRv2's ``bw_lo`` and loss threshold |
+| DRAIN ends after 2 rounds even if bytes in flight still exceed the BDP | **Implementation choice** (prevents a stall when BtlBW is underestimated) |
 | 10-round BtlBW window, 10 s RTprop expiry, 200 ms PROBE_RTT, 4-packet minimum window | BBR defaults |
 
 All tunable values are constants at the top of ``minquic/congestion.py``.
@@ -78,6 +79,9 @@ All tunable values are constants at the top of ``minquic/congestion.py``.
 - Under jitter, RTprop settles at the jitter minimum, so Algorithm 2 with the
   paper's φr1 = 1.1 can detect a competitor where there is none and switch to
   BBRv2 mode.
+- Jitter also makes QUIC's loss detection declare late packets lost. The 2 %
+  loss-rate threshold keeps those spurious losses from collapsing the
+  bandwidth estimate, but they still cost throughput.
 - On plain loopback (no netem) RTprop is far below the RTT under load
   (processing delay dominates), so MINBBR keeps a small window; compare the
   protocols only under netem conditions.
