@@ -8,7 +8,6 @@ recorded via the shared ``MetricsCollector``.
 import argparse
 
 import asyncio
-import csv
 import os
 import yaml
 import time
@@ -17,7 +16,7 @@ from aioquic.quic.events import StreamDataReceived, ConnectionTerminated
 from aioquic.asyncio import connect, QuicConnectionProtocol
 
 from .connection import create_quic_configuration
-from .metrics import metrics
+from .metrics import dump_trace, metrics
 from .congestion import get_congestion_stats
 from .flow_control import get_flow_control_limits
 from common.logger import get_logger
@@ -168,17 +167,8 @@ async def run_client(cli_args=None):
         print(f"[INFO] Metrics dumped to CSV: {out_path}")
         if cli_args is not None and getattr(cli_args, "trace", False):
             trace_path = os.path.join(cfg["metrics"]["output_dir"], f"minquic_trace_{timestamp}.csv")
-            _dump_trace(client._quic._loss._cc.trace, trace_path)
+            dump_trace(client._quic._loss._cc.trace, trace_path)
             print(f"[INFO] MINBBR per-round trace dumped to CSV: {trace_path}")
-
-def _dump_trace(rows, path):
-    """Write the MINBBR per-round trace (one row per round trip)."""
-    if not rows:
-        return
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
 def main():
     parser = argparse.ArgumentParser(description="QUIC client")

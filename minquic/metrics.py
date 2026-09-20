@@ -62,5 +62,15 @@ class MetricsCollector:
         """
         self._records.clear()
 
+def dump_trace(rows: list, filepath: str) -> None:
+    """Write a MINBBR per-round trace (one row per round trip) to CSV."""
+    if not rows:
+        return
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
 # Export a singleton instance for convenience.
 metrics = MetricsCollector()

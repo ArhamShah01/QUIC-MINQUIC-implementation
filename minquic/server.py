@@ -1,5 +1,9 @@
 """QUIC server implementation using aioquic.
 
+Set ``MINQUIC_TRACE=1`` to write MINBBR's per-round trace for each connection
+to ``<output_dir>/minquic_server_trace_<timestamp>.csv``: the server sends the
+echo, so its congestion control is what limits the reverse direction.
+
 The server reads configuration from ``config/config.yaml`` and starts a
 QUIC listener on the specified host and port. It uses a simple echo
 behaviour: data received on a stream is sent back unchanged. The server
@@ -8,6 +12,7 @@ collector.
 """
 import asyncio
 import os
+from datetime import datetime
 import subprocess
 import yaml
 from aioquic.asyncio import serve
@@ -15,7 +20,7 @@ from aioquic.quic.events import StreamDataReceived, ConnectionTerminated
 from aioquic.asyncio import QuicConnectionProtocol
 
 from .connection import create_quic_configuration
-from .metrics import metrics
+from .metrics import dump_trace, metrics
 from .congestion import get_congestion_stats
 from .flow_control import get_flow_control_limits
 from common.logger import get_logger
@@ -81,7 +86,19 @@ class EchoQuicProtocol(QuicConnectionProtocol):
             print(f"  rtt={cong_stats.get('rtt')}")
             print(f"  max_data={flow_stats.get('max_data')}")
             print(f"  max_stream_data={flow_stats.get('max_stream_data')}")
+            if os.environ.get("MINQUIC_TRACE"):
+                _dump_server_trace(self._quic)
                                                 
+def _dump_server_trace(connection) -> None:
+    """Write this connection's MINBBR trace, for debugging the echo direction."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config", "config.yaml")
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    path = os.path.join(cfg["metrics"]["output_dir"], f"minquic_server_trace_{timestamp}.csv")
+    dump_trace(connection._loss._cc.trace, path)
+    print(f"[INFO] MINBBR server trace dumped to CSV: {path}")
+
 async def _run_server(cfg):
     server_cfg = cfg["server"]
     quic_cfg = create_quic_configuration(
