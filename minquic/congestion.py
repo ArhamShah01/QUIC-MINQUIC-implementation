@@ -34,6 +34,11 @@ THETA_R2 = 4    # consecutive rounds before switching back to MINBBR mode
 # STARTUP ends once BtlBW grows by less than this factor for this many rounds.
 FULL_BW_THRESHOLD = 1.25
 FULL_BW_ROUNDS = 3
+# Cap on the STARTUP window, as a multiple of the measured BDP (BBR uses a
+# comparable gain). Without it the window doubles every round until the
+# plateau is detected, which on a fast path overshoots the bottleneck queue by
+# megabytes before STARTUP ends.
+STARTUP_CWND_GAIN = 3.0
 
 # PROBE_RTT: re-measure RTprop if it has not been refreshed for this long.
 RTPROP_EXPIRY = 10.0  # seconds
@@ -337,8 +342,11 @@ class MinBbrCongestionControl(QuicCongestionControl):
             self.congestion_window = self._min_window
             return
         if self.state == "STARTUP":
-            # Grow by every acked byte (doubling per round) until full BW.
+            # Grow by every acked byte (doubling per round) until full BW,
+            # but never far beyond the BDP measured so far.
             cwnd = self.congestion_window + acked_bytes
+            if self.bdp > 0:
+                cwnd = min(cwnd, max(int(STARTUP_CWND_GAIN * self.bdp), self._initial_window))
         else:
             cwnd = min(self.congestion_window + acked_bytes, self.get_congestion_window())
         self.congestion_window = max(cwnd, self._min_window)

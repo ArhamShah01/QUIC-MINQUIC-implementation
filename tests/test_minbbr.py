@@ -7,6 +7,7 @@ from aioquic.quic.congestion.reno import RenoCongestionControl
 
 from minquic.congestion import (
     MAX_DRAIN_ROUNDS,
+    STARTUP_CWND_GAIN,
     PROBE_BW_CWND_GAINS,
     MinBbrCongestionControl,
 )
@@ -287,3 +288,15 @@ def test_samples_shorter_than_rtprop_are_discarded():
         cc.on_packet_acked(now=1.005, packet=packet)
     new_samples = [bw for r, bw in cc.btl_bw_filter if (r, bw) not in filter_before]
     assert new_samples == []
+
+
+def test_startup_window_is_capped_at_a_multiple_of_bdp():
+    """STARTUP must not run away before the BtlBW plateau is detected."""
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = 0, 0.0
+    for _ in range(4):
+        pn = run_round(cc, pn, now=now, rtt=0.05, packets=200)
+        now += 0.1
+        if cc.state != "STARTUP":
+            break
+        assert cc.congestion_window <= max(STARTUP_CWND_GAIN * cc.bdp, 10 * 1200)

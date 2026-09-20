@@ -28,7 +28,7 @@ window, using a gain relative to the estimated BDP in each state.
 
 | State | Behaviour | Exit |
 | ----- | --------- | ---- |
-| STARTUP | Window grows by every acknowledged byte (doubles per round) | BtlBW grows < 25 % for 3 rounds, or loss |
+| STARTUP | Window grows by every acknowledged byte (doubles per round), capped at 3 × BDP | BtlBW grows < 25 % for 3 rounds, or a round with > 2 % loss |
 | DRAIN | Window 1 × BDP | Bytes in flight ≤ BDP, or 2 rounds |
 | PROBE_BW | Cycles DOWN → CRUISE (6 rounds) → REFILL → UP, one round each otherwise | RTprop expiry → PROBE_RTT |
 | PROBE_RTT | Window 4 packets for 200 ms | Back to PROBE_BW (or STARTUP) |
@@ -60,6 +60,7 @@ overflowed the bottleneck queue on every cycle.
 | Window gains per phase and mode (table above) | **Implementation choice** (the paper gives none) |
 | Loss response: at the end of a round whose loss rate exceeded 2 %, ``bw_lo`` = 0.8 × current model bandwidth; lifted at the next REFILL; such a round also ends STARTUP | **Implementation choice**, modelled on BBRv2's ``bw_lo`` and loss threshold |
 | DRAIN ends after 2 rounds even if bytes in flight still exceed the BDP | **Implementation choice** (prevents a stall when BtlBW is underestimated) |
+| STARTUP window capped at 3 × BDP | **Implementation choice**; uncapped doubling overshot a 1.5 MB bottleneck queue by megabytes on a fast path, and the resulting loss and queueing stalled the connection |
 | 10-round BtlBW window, 10 s RTprop expiry, 200 ms PROBE_RTT, 4-packet minimum window | BBR defaults |
 
 All tunable values are constants at the top of ``minquic/congestion.py``.
