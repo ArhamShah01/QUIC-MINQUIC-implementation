@@ -26,3 +26,21 @@ def test_write_sweep_puts_condition_columns_first(tmp_path):
     assert list(read[0])[:8] == list(BASELINE) + ["protocol", "run", "status"]
     assert read[1]["status"] == "timeout"
     assert read[1]["goodput_mbps"] == ""
+
+
+def test_summarise_reports_mean_and_ratio():
+    from experiments.analyse_sweep import summarise
+
+    rows = [
+        dict(BASELINE, protocol="quic", run=1, status="ok", goodput_mbps="10"),
+        dict(BASELINE, protocol="quic", run=2, status="ok", goodput_mbps="12"),
+        dict(BASELINE, protocol="minquic", run=1, status="ok", goodput_mbps="22"),
+        dict(BASELINE, protocol="minquic", run=2, status="timeout", goodput_mbps=""),
+    ]
+    rows = [{k: str(v) for k, v in r.items()} for r in rows]
+    [entry] = summarise(rows, "goodput_mbps")
+    assert entry["quic_mean"] == 11
+    assert entry["quic_n"] == 2
+    assert entry["minquic_mean"] == 22
+    assert entry["minquic_failed"] == 1
+    assert entry["ratio"] == 2

@@ -85,6 +85,10 @@ def parse_args() -> argparse.Namespace:
 
 def run_once(protocol: str, args: argparse.Namespace) -> dict:
     """Start the server, run one client, and return its client_complete record."""
+    if not args.dry_run:
+        # Keep the sudo timestamp alive: a slow condition can outlast it, and
+        # an expired timestamp mid-sweep would leave the previous rule in place.
+        _require_sudo()
     pattern = f"{protocol}_client_*.csv"
     existing = set(args.output_dir.glob(pattern))
     server = subprocess.Popen(
@@ -149,8 +153,6 @@ def main() -> None:
             print(f"[DRY-RUN] {build_netem_command(args.interface, **condition)}")
             netem = contextlib.nullcontext()
         else:
-            # Refresh the sudo timestamp, so a long sweep cannot stall (or
-            # silently keep the previous condition) when it expires.
             _require_sudo()
             netem = netem_conditions(args.interface, **condition)
         with netem:
