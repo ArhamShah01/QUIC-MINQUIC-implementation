@@ -1,8 +1,15 @@
 """Tests that MINBBR is actually the congestion controller aioquic uses."""
+import math
+
+import pytest
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.congestion.reno import RenoCongestionControl
 
-from minquic.congestion import PROBE_BW_CWND_GAINS, MinBbrCongestionControl
+from minquic.congestion import (
+    MAX_DRAIN_ROUNDS,
+    PROBE_BW_CWND_GAINS,
+    MinBbrCongestionControl,
+)
 from minquic.connection import create_quic_configuration as minquic_configuration
 from quic.connection import create_quic_configuration as quic_configuration
 
@@ -182,35 +189,71 @@ def test_btl_bw_filter_window_expires_old_samples():
     assert cc.btl_bw < fast
 
 
-def test_loss_in_startup_caps_bandwidth_and_drains():
+def run_round_with_loss(cc, first_pn, now, rtt, packets=10, lost=0):
+    """Send ``packets``; the first ``lost`` are declared lost, the rest acked."""
+    sent = [FakePacket(first_pn + i, sent_time=now) for i in range(packets)]
+    for packet in sent:
+        cc.on_packet_sent(packet=packet)
+    if lost:
+        cc.on_packets_lost(now=now + rtt, packets=sent[:lost])
+    for packet in sent[lost:]:
+        cc.on_packet_acked(now=now + rtt, packet=packet)
+    cc.on_rtt_measurement(now=now + rtt, rtt=rtt)
+    return first_pn + packets
+
+
+def test_loss_below_threshold_is_ignored():
+    """Jitter makes late packets look lost; a trickle must not cap bandwidth."""
     cc = MinBbrCongestionControl(max_datagram_size=1200)
-    run_round(cc, 0, now=0.0, rtt=0.05)
-    btl_bw = cc.btl_bw
-    cc.on_packets_lost(now=1.0, packets=[])
-    assert cc.state == "DRAIN"
-    # The filter is untouched; the loss only sets the short-term cap.
-    assert cc.btl_bw == btl_bw
-    assert cc.bw_lo == btl_bw * 0.8
-    assert cc.model_bw == btl_bw * 0.8
-    assert cc.bdp == cc.model_bw * cc.rtprop
-    assert cc.congestion_window >= 4 * 1200
+    pn = run_round(cc, 0, now=0.0, rtt=0.05, packets=100)
+    # 1 of 100 packets = 1%, below LOSS_RATE_THRESHOLD.
+    pn = run_round_with_loss(cc, pn, now=0.1, rtt=0.05, packets=100, lost=1)
+    pn = run_round(cc, pn, now=0.2, rtt=0.05, packets=100)
+    assert cc.bw_lo == math.inf
+    assert cc.model_bw == cc.btl_bw
 
 
-def test_loss_response_at_most_once_per_round():
+def test_loss_above_threshold_caps_bandwidth():
     cc = MinBbrCongestionControl(max_datagram_size=1200)
-    run_round(cc, 0, now=0.0, rtt=0.05)
+    pn = run_round(cc, 0, now=0.0, rtt=0.05, packets=100)
+    pn = run_round_with_loss(cc, pn, now=0.1, rtt=0.05, packets=100, lost=20)
     btl_bw = cc.btl_bw
-    cc.on_packets_lost(now=1.0, packets=[])
-    cc.on_packets_lost(now=1.01, packets=[])
-    assert cc.bw_lo == btl_bw * 0.8
+    # The response is applied at the end of the round that saw the loss.
+    run_round(cc, pn, now=0.2, rtt=0.05, packets=100)
+    assert cc.bw_lo == pytest.approx(btl_bw * 0.8)
+    assert cc.bdp == pytest.approx(cc.model_bw * cc.rtprop)
 
 
-def test_loss_in_probe_bw_keeps_state_and_cap_lifts_at_refill():
+def test_heavy_loss_in_startup_ends_startup():
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn = run_round(cc, 0, now=0.0, rtt=0.05, packets=100)
+    assert cc.state == "STARTUP"
+    pn = run_round_with_loss(cc, pn, now=0.1, rtt=0.05, packets=100, lost=30)
+    run_round(cc, pn, now=0.2, rtt=0.05, packets=100)
+    assert cc.state in ("DRAIN", "PROBE_BW")
+    assert cc._full_bw_reached
+
+
+def test_drain_times_out_when_bdp_is_underestimated():
+    """DRAIN must not trap the flow when the BDP estimate is too small."""
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn = run_round(cc, 0, now=0.0, rtt=0.05)
+    cc.state = "DRAIN"
+    cc._drain_rounds = 0
+    cc.bdp = 1.0  # far below anything that can be in flight
+    now = 0.1
+    for _ in range(MAX_DRAIN_ROUNDS + 1):
+        pn = run_round(cc, pn, now=now, rtt=0.05)
+        now += 0.1
+    assert cc.state == "PROBE_BW"
+
+
+def test_loss_cap_lifts_at_refill():
     cc = MinBbrCongestionControl(max_datagram_size=1200)
     pn, now = run_until_probe_bw(cc, 0, 0.0)
-    cc.on_packets_lost(now=now, packets=[])
-    assert cc.state == "PROBE_BW"
-    assert cc.bw_lo < cc.btl_bw
+    cc.bw_lo = cc.btl_bw * 0.8
+    cc._update_bdp()
+    assert cc.model_bw < cc.btl_bw
     for _ in range(10):
         pn = run_round(cc, pn, now=now, rtt=0.05)
         now += 0.1

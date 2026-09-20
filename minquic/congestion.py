@@ -60,10 +60,19 @@ PROBE_BW_CWND_GAINS = {
 }
 DRAIN_CWND_GAIN = 1.0
 
-# Loss response (implementation choice, BBRv2-style): once per round with
-# loss, cap the model bandwidth at LOSS_BW_FACTOR of its current value. The
-# cap is short-term and is lifted when ProbeBW next enters REFILL.
+# Loss response (implementation choice, BBRv2-style): at the end of a round
+# whose loss rate exceeded LOSS_RATE_THRESHOLD, cap the model bandwidth at
+# LOSS_BW_FACTOR of its current value. The cap is short-term and is lifted
+# when ProbeBW next enters REFILL. The threshold matters under jitter, where
+# late packets are declared lost although nothing was dropped; reacting to
+# every such packet collapses the estimate.
 LOSS_BW_FACTOR = 0.8
+LOSS_RATE_THRESHOLD = 0.02
+
+# DRAIN ends when the queue this flow built has left the network. Give up
+# after this many rounds anyway: if BtlBW was underestimated, bytes in flight
+# may never fall below the (too small) BDP.
+MAX_DRAIN_ROUNDS = 2
 
 INITIAL_WINDOW_PACKETS = 10
 MIN_WINDOW_PACKETS = 4
@@ -111,7 +120,9 @@ class MinBbrCongestionControl(QuicCongestionControl):
         self.probe_bw_phase = None  # PROBE_BW sub-state, see PROBE_BW_PHASES
         self._phase_rounds = 0
         self._cruise_min_rtt = None
-        self._loss_round = None  # round of the last loss response
+        self._round_lost_bytes = 0
+        self._round_start_delivered = 0
+        self._drain_rounds = 0
 
         # Delivery-rate sampling (as in BBR): bytes delivered so far, when the
         # latest ACK arrived, the send time of the latest acked packet, and
@@ -214,6 +225,7 @@ class MinBbrCongestionControl(QuicCongestionControl):
 
     def _enter_probe_bw(self) -> None:
         self.state = "PROBE_BW"
+        self._drain_rounds = 0
         self.probe_bw_phase = "DOWN"
         self._phase_rounds = 0
         self._cruise_min_rtt = None
@@ -242,6 +254,23 @@ class MinBbrCongestionControl(QuicCongestionControl):
             self.bw_lo = math.inf
             self._update_bdp()
 
+    def _apply_loss_response(self) -> None:
+        """Cap the model bandwidth if this round lost more than the threshold."""
+        delivered = self._delivered - self._round_start_delivered
+        total = delivered + self._round_lost_bytes
+        loss_rate = self._round_lost_bytes / total if total else 0.0
+        self._round_lost_bytes = 0
+        self._round_start_delivered = self._delivered
+        if loss_rate <= LOSS_RATE_THRESHOLD:
+            return
+        self.bw_lo = LOSS_BW_FACTOR * self.model_bw
+        self._update_bdp()
+        if self.state == "STARTUP":
+            # Real loss means the pipe is full: stop growing and drain.
+            self._full_bw_reached = True
+            self.state = "DRAIN"
+            self._drain_rounds = 0
+
     def _on_round_end(self, now: float) -> None:
         self.trace.append({
             "time": now,
@@ -256,6 +285,9 @@ class MinBbrCongestionControl(QuicCongestionControl):
             "rtprop": self.rtprop,
             "round_min_rtt": self._round_min_rtt,
         })
+        self._apply_loss_response()
+        if self.state == "DRAIN":
+            self._drain_rounds += 1
         if self.rtprop is not None and self._round_min_rtt is not None:
             self._apply_min_btlbw_filter()
         if self.state == "PROBE_BW":
@@ -270,7 +302,9 @@ class MinBbrCongestionControl(QuicCongestionControl):
                 self.state = "DRAIN"
 
     def _update_state(self, now: float) -> None:
-        if self.state == "DRAIN" and self.bytes_in_flight <= self.bdp:
+        if self.state == "DRAIN" and (
+            self.bytes_in_flight <= self.bdp or self._drain_rounds >= MAX_DRAIN_ROUNDS
+        ):
             self._enter_probe_bw()
 
         # Enter PROBE_RTT when RTprop has not been refreshed recently.
@@ -374,21 +408,12 @@ class MinBbrCongestionControl(QuicCongestionControl):
             self._packet_state.pop((packet.epoch, packet.packet_number), None)
 
     def on_packets_lost(self, *, now: float, packets: Iterable[QuicSentPacket]) -> None:
+        # Losses are accumulated and answered once per round, in
+        # _apply_loss_response, so that a round's loss rate can be measured.
         for packet in packets:
             self.bytes_in_flight -= packet.sent_bytes
+            self._round_lost_bytes += packet.sent_bytes
             self._packet_state.pop((packet.epoch, packet.packet_number), None)
-        # React at most once per round trip: one loss event often spans
-        # several callbacks, and repeated cuts would compound.
-        if self._loss_round == self.round_count:
-            return
-        self._loss_round = self.round_count
-        self.bw_lo = LOSS_BW_FACTOR * self.model_bw
-        self._update_bdp()
-        if self.state == "STARTUP":
-            # Loss means the pipe is full: stop growing and drain the queue.
-            self.state = "DRAIN"
-            self._full_bw_reached = True
-        self.congestion_window = min(self.congestion_window, self.get_congestion_window())
 
     def on_rtt_measurement(self, *, now: float, rtt: float) -> None:
         # Update RTprop (min RTT), or take a fresh sample once it has expired;
