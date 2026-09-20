@@ -13,25 +13,35 @@ from .logger import get_logger
 
 LOGGER = get_logger("common.network")
 
-def _run_tc(command: str) -> None:
-    """Execute a ``tc`` command, logging any errors.
+class NetemError(RuntimeError):
+    """A ``tc`` command failed, so the network conditions are not what was asked for."""
+
+def _run_tc(command: str, check: bool = True) -> None:
+    """Execute a ``tc`` command.
 
     Parameters
     ----------
     command:
         The full ``tc`` command string (without ``sudo`` – the caller
         should include it if required).
+    check:
+        Raise :class:`NetemError` if the command fails. Experiments must not
+        continue when a rule was not applied: the previous condition would
+        still be in force and the results would be labelled wrongly.
     """
     try:
         subprocess.run(shlex.split(command), check=True, capture_output=True)
         LOGGER.debug("Executed tc command: %s", command)
     except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="ignore").strip()
         LOGGER.error(
             "tc command failed: %s (stdout=%s stderr=%s)",
             command,
             exc.stdout.decode(errors="ignore"),
-            exc.stderr.decode(errors="ignore"),
+            stderr,
         )
+        if check:
+            raise NetemError(f"{command}: {stderr}") from exc
 
 def build_netem_command(
     interface: str,
@@ -83,7 +93,7 @@ def apply_netem(
         queue_packets=queue_packets,
     ))
 
-def clear_netem(interface: str) -> None:
+def clear_netem(interface: str, check: bool = True) -> None:
     """Remove any netem rules from *interface*.
     """
-    _run_tc(f"sudo tc qdisc del dev {shlex.quote(interface)} root")
+    _run_tc(f"sudo tc qdisc del dev {shlex.quote(interface)} root", check=check)

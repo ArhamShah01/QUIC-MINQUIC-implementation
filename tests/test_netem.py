@@ -1,3 +1,5 @@
+import pytest
+
 from common.network import build_netem_command
 from experiments.network_conditions import netem_conditions
 
@@ -24,3 +26,19 @@ def test_netem_command_combines_all_conditions():
 
 def test_netem_command_omits_unset_conditions():
     assert build_netem_command("lo", latency_ms=10) == "sudo tc qdisc add dev lo root netem delay 10ms"
+
+
+def test_failed_tc_command_raises(monkeypatch):
+    """A failed tc command must stop the experiment, not be logged and ignored."""
+    import subprocess
+
+    import common.network as network
+
+    def boom(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, "tc", output=b"", stderr=b"Exclusivity flag on")
+
+    monkeypatch.setattr(network.subprocess, "run", boom)
+    with pytest.raises(network.NetemError):
+        network.apply_netem("lo", latency_ms=10)
+    # clear_netem(check=False) is for best-effort cleanup.
+    network.clear_netem("lo", check=False)

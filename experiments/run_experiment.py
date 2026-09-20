@@ -29,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from common.network import build_netem_command
+from common.network import NetemError, build_netem_command
 from .network_conditions import netem_conditions
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -136,6 +136,8 @@ def main() -> None:
             "bandwidth_mbps": args.bandwidth, "queue_packets": args.queue,
         }]
 
+    if not args.dry_run:
+        _require_sudo()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     sweep_path = args.output_dir / f"sweep_{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
     rows = []
@@ -147,6 +149,9 @@ def main() -> None:
             print(f"[DRY-RUN] {build_netem_command(args.interface, **condition)}")
             netem = contextlib.nullcontext()
         else:
+            # Refresh the sudo timestamp, so a long sweep cannot stall (or
+            # silently keep the previous condition) when it expires.
+            _require_sudo()
             netem = netem_conditions(args.interface, **condition)
         with netem:
             for run in range(1, args.runs + 1):
@@ -161,6 +166,13 @@ def main() -> None:
                              if record["status"] == "ok" else ""))
                     _write_sweep(sweep_path, rows)
     print(f"[INFO] Sweep results: {sweep_path}")
+
+
+def _require_sudo() -> None:
+    """Make sure ``sudo`` works without a password prompt, and refresh it."""
+    if subprocess.run(["sudo", "-n", "-v"], capture_output=True).returncode != 0:
+        sys.exit("[ERROR] sudo needs a password. Run 'sudo -v' in this terminal "
+                 "first, then start the sweep again (netem needs root).")
 
 
 def _write_sweep(path: Path, rows: list) -> None:
@@ -179,3 +191,7 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         sys.exit(0)
+    except NetemError as exc:
+        sys.exit(f"[ERROR] Network conditions could not be applied: {exc}\n"
+                 "        Stopping: results would not match the labelled condition.\n"
+                 "        Check for a leftover rule with 'tc qdisc show dev lo'.")
