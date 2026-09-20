@@ -300,3 +300,37 @@ def test_startup_window_is_capped_at_a_multiple_of_bdp():
         if cc.state != "STARTUP":
             break
         assert cc.congestion_window <= max(STARTUP_CWND_GAIN * cc.bdp, 10 * 1200)
+
+
+def run_window_limited_round(cc, first_pn, now, rtt, mss=1200):
+    """One round that sends only what the window allows, then acks it all.
+
+    This closes the loop between window and measured rate: a small window
+    delivers little, which measures a low rate.
+    """
+    packets = max(1, int(cc.congestion_window) // mss)
+    sent = [FakePacket(first_pn + i, sent_bytes=mss, sent_time=now + i * rtt / packets)
+            for i in range(packets)]
+    for packet in sent:
+        cc.on_packet_sent(packet=packet)
+    for i, packet in enumerate(sent):
+        cc.on_packet_acked(now=now + rtt + i * rtt / packets, packet=packet)
+    cc.on_rtt_measurement(now=now + rtt, rtt=rtt)
+    return first_pn + packets
+
+
+def test_probe_up_grows_window_when_bandwidth_estimate_is_stale():
+    """A collapsed BtlBW must not trap the flow at the minimum window."""
+    cc = MinBbrCongestionControl(max_datagram_size=1200)
+    pn, now = run_until_probe_bw(cc, 0, 0.0)
+    # Simulate a collapsed estimate and window, as seen on a jittery path.
+    cc.btl_bw_filter = [(cc.round_count, 1000.0)]
+    cc._update_btl_bw()
+    cc.congestion_window = cc._min_window
+    cc.inflight_hi = 0
+    assert cc.get_congestion_window() == cc._min_window  # the target cannot grow
+
+    for _ in range(40):
+        pn = run_window_limited_round(cc, pn, now=now, rtt=0.05)
+        now += 0.05
+    assert cc.congestion_window > 4 * cc._min_window

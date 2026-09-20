@@ -79,6 +79,15 @@ LOSS_RATE_THRESHOLD = 0.02
 # may never fall below the (too small) BDP.
 MAX_DRAIN_ROUNDS = 2
 
+# UP probes by growing the window to at least this multiple of its current
+# value. BBR probes the amount in flight; a target of gain x BDP alone can
+# never exceed the window when BtlBW has collapsed, trapping the flow.
+PROBE_UP_GROWTH = 2.0
+# Largest in-flight that did not cause loss (BBRv2's inflight_hi). Phase gains
+# apply to this as well as to the BDP, so a BtlBW estimate depressed by our
+# own small window cannot keep the window small.
+INFLIGHT_HI_DECAY = 0.85
+
 INITIAL_WINDOW_PACKETS = 10
 MIN_WINDOW_PACKETS = 4
 
@@ -126,8 +135,11 @@ class MinBbrCongestionControl(QuicCongestionControl):
         self._phase_rounds = 0
         self._cruise_min_rtt = None
         self._round_lost_bytes = 0
+        self._round_max_inflight = 0
         self._round_start_delivered = 0
         self._drain_rounds = 0
+        self._probe_up_target = None  # window ceiling while probing in UP
+        self.inflight_hi = 0  # bytes; largest lossless in-flight seen
         self._last_round_time = None
 
         # Delivery-rate sampling (as in BBR): bytes delivered so far, when the
@@ -235,6 +247,7 @@ class MinBbrCongestionControl(QuicCongestionControl):
         self.probe_bw_phase = "DOWN"
         self._phase_rounds = 0
         self._cruise_min_rtt = None
+        self._probe_up_target = None
 
     def _advance_probe_bw_phase(self) -> None:
         """Move through the ProbeBW sub-states at the end of each round."""
@@ -259,6 +272,13 @@ class MinBbrCongestionControl(QuicCongestionControl):
             # Start of a new probing cycle: lift the short-term loss cap.
             self.bw_lo = math.inf
             self._update_bdp()
+        if self.probe_bw_phase == "UP":
+            self._probe_up_target = max(
+                int(PROBE_UP_GROWTH * self.congestion_window),
+                self.get_congestion_window(),
+            )
+        else:
+            self._probe_up_target = None
 
     def _apply_loss_response(self) -> None:
         """Cap the model bandwidth if this round lost more than the threshold."""
@@ -270,6 +290,8 @@ class MinBbrCongestionControl(QuicCongestionControl):
         if loss_rate <= LOSS_RATE_THRESHOLD:
             return
         self.bw_lo = LOSS_BW_FACTOR * self.model_bw
+        # The pipe overflowed: remember a smaller safe in-flight.
+        self.inflight_hi = INFLIGHT_HI_DECAY * self.inflight_hi
         self._update_bdp()
         if self.state == "STARTUP":
             # Real loss means the pipe is full: stop growing and drain.
@@ -297,6 +319,10 @@ class MinBbrCongestionControl(QuicCongestionControl):
             "round_min_rtt": self._round_min_rtt,
         })
         self._last_round_time = now
+        if self._round_lost_bytes == 0:
+            # This round delivered without loss: that much in flight is safe.
+            self.inflight_hi = max(self.inflight_hi, self._round_max_inflight)
+        self._round_max_inflight = 0
         self._apply_loss_response()
         if self.state == "DRAIN":
             self._drain_rounds += 1
@@ -347,20 +373,24 @@ class MinBbrCongestionControl(QuicCongestionControl):
             cwnd = self.congestion_window + acked_bytes
             if self.bdp > 0:
                 cwnd = min(cwnd, max(int(STARTUP_CWND_GAIN * self.bdp), self._initial_window))
+        elif self._probe_up_target is not None:
+            # UP: grow towards the probe target whatever BtlBW currently says.
+            cwnd = min(self.congestion_window + acked_bytes, self._probe_up_target)
         else:
             cwnd = min(self.congestion_window + acked_bytes, self.get_congestion_window())
         self.congestion_window = max(cwnd, self._min_window)
 
     def get_congestion_window(self) -> int:
         """Return the target congestion window for the current state."""
-        if self.bdp <= 0:
+        base = max(self.bdp, self.inflight_hi)
+        if base <= 0:
             return self._initial_window
         if self.state == "PROBE_BW":
             gain = PROBE_BW_CWND_GAINS[self.probe_bw_version][self.probe_bw_phase]
         else:
             gain = DRAIN_CWND_GAIN
         # Never drop below the minimum window, or the connection stalls.
-        return max(int(self.bdp * gain), self._min_window)
+        return max(int(base * gain), self._min_window)
 
     def get_pacing_rate(self) -> float:
         """Return the pacing rate for packet injection.
@@ -406,11 +436,13 @@ class MinBbrCongestionControl(QuicCongestionControl):
         self._update_congestion_window(packet.sent_bytes)
 
     def on_packet_sent(self, *, packet: QuicSentPacket) -> None:
+        # Tracked per round to maintain inflight_hi (see _on_round_end).
         if self.bytes_in_flight == 0:
             # Nothing in flight (start or after idle): measure from now.
             self._delivered_time = packet.sent_time
             self._first_sent_time = packet.sent_time
         self.bytes_in_flight += packet.sent_bytes
+        self._round_max_inflight = max(self._round_max_inflight, self.bytes_in_flight)
         self._packet_state[(packet.epoch, packet.packet_number)] = (
             self._delivered,
             self._delivered_time,

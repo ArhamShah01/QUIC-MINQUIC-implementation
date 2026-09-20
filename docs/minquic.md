@@ -60,6 +60,8 @@ overflowed the bottleneck queue on every cycle.
 | Window gains per phase and mode (table above) | **Implementation choice** (the paper gives none) |
 | Loss response: at the end of a round whose loss rate exceeded 2 %, ``bw_lo`` = 0.8 × current model bandwidth; lifted at the next REFILL; such a round also ends STARTUP | **Implementation choice**, modelled on BBRv2's ``bw_lo`` and loss threshold |
 | DRAIN ends after 2 rounds even if bytes in flight still exceed the BDP | **Implementation choice** (prevents a stall when BtlBW is underestimated) |
+| Window targets use max(BDP, inflight_hi), where inflight_hi is the largest in-flight that caused no loss (decayed 0.85 on a loss round) | **Implementation choice**, from BBRv2. With the window as the only control, a gain x BDP target is circular: a small window measures a low rate, which keeps the window small. On a jittery path this trapped the flow at the 4-packet minimum for 94 % of a run |
+| UP grows the window to at least 2 x its current value | **Implementation choice**; probing must not depend on the possibly-depressed BtlBW estimate |
 | STARTUP window capped at 3 × BDP | **Implementation choice**; uncapped doubling overshot a 1.5 MB bottleneck queue by megabytes on a fast path, and the resulting loss and queueing stalled the connection |
 | 10-round BtlBW window, 10 s RTprop expiry, 200 ms PROBE_RTT, 4-packet minimum window | BBR defaults |
 
