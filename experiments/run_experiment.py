@@ -78,6 +78,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--queue", type=int, default=0, help="netem queue limit in packets (0 = default)")
     parser.add_argument("--grid", action="store_true", help="Run the predefined condition grid")
     parser.add_argument("--dry-run", action="store_true", help="Print tc commands instead of applying netem")
+    parser.add_argument("--trace", action="store_true",
+                        help="Ask the MINQUIC client for its per-round MINBBR trace CSV")
     args = parser.parse_args()
     args.output_dir = PROJECT_ROOT / cfg["metrics"]["output_dir"]
     return args
@@ -97,10 +99,13 @@ def run_once(protocol: str, args: argparse.Namespace) -> dict:
     )
     try:
         time.sleep(1.0)  # let the server bind
+        command = [sys.executable, "-m", f"{protocol}.client",
+                   "--payload-size", str(args.payload_size), "--streams", str(args.streams)]
+        if args.trace and protocol == "minquic":
+            command.append("--trace")
         try:
             subprocess.run(
-                [sys.executable, "-m", f"{protocol}.client",
-                 "--payload-size", str(args.payload_size), "--streams", str(args.streams)],
+                command,
                 cwd=PROJECT_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=args.timeout, check=True,
             )
